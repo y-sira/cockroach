@@ -962,9 +962,8 @@ func (mb *mutationBuilder) buildFKChecksForUpdate() {
 	//   --+---+---+------
 	//   1 | 3 | 5 |  10
 	//
-	// Then oldRowCols will be [0, 1, 2] (corresponding to the old row of
-	// [1 3 5]), and newRowCols will be [0, 3, 2] (corresponding to the new row of
-	// [1 10 5]).
+	// The insertion check will happen on the "new" row (1, 10, 5); the deletion
+	// check will happen on the "old" row (1, 3, 5).
 
 	for i, n := 0, mb.tab.OutboundForeignKeyCount(); i < n; i++ {
 		// Verify that at least one FK column is actually updated.
@@ -1034,15 +1033,22 @@ func (mb *mutationBuilder) buildFKChecksForUpdate() {
 }
 
 func (mb *mutationBuilder) buildFKChecksForUpsert() {
-	if mb.tab.OutboundForeignKeyCount() == 0 && mb.tab.InboundForeignKeyCount() == 0 {
+	numOutbound := mb.tab.OutboundForeignKeyCount()
+	numInbound := mb.tab.InboundForeignKeyCount()
+
+	if numOutbound == 0 && numInbound == 0 {
 		return
 	}
 	if !mb.b.evalCtx.SessionData.OptimizerFKs {
 		mb.fkFallback = true
 		return
 	}
-	// TODO(justin): not implemented yet.
-	mb.fkFallback = true
+
+	mb.withID = mb.b.factory.Memo().NextWithID()
+
+	for i := 0; i < numOutbound; i++ {
+		mb.addInsertionCheck(i)
+	}
 }
 
 // addInsertionCheck adds a FK check for rows which are added to a table.
