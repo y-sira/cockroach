@@ -1012,12 +1012,15 @@ func (mb *mutationBuilder) buildFKChecksForUpdate() {
 			return
 		}
 
+		// Construct an Except expression for the set difference between "old"
+		// FK values and "new" FK values.
+
 		oldRows, colsForOldRow, _ := h.makeFKInputScan(fkInputScanFetchedVals)
 		newRows, colsForNewRow, _ := h.makeFKInputScan(fkInputScanNewVals)
 
 		// The rows that no longer exist are the ones that were "deleted" by virtue
 		// of being updated _from_, minus the ones that were "added" by virtue of
-		// being updated _to_. Note that this could equivalently be ExceptAll.
+		// being updated _to_.
 		deletedRows := mb.b.factory.ConstructExcept(
 			oldRows,
 			newRows,
@@ -1039,6 +1042,7 @@ func (mb *mutationBuilder) buildFKChecksForUpsert() {
 	if numOutbound == 0 && numInbound == 0 {
 		return
 	}
+
 	if !mb.b.evalCtx.SessionData.OptimizerFKs {
 		mb.fkFallback = true
 		return
@@ -1048,6 +1052,53 @@ func (mb *mutationBuilder) buildFKChecksForUpsert() {
 
 	for i := 0; i < numOutbound; i++ {
 		mb.addInsertionCheck(i)
+	}
+
+	if mb.canaryColID == 0 {
+		// We are using the upsert fast path, so we decided that we don't need the
+		// "old" values. Any inbound FKs must be on PK columns (and an UPSERT never
+		// removes key column values). See needExistingRows().
+		//
+		// TODO(radu): similar optimization is possible in cases where the fast path
+		// is not used, including ON CONFLICT on a non-PK index.
+		return
+	}
+
+	for i := 0; i < numInbound; i++ {
+		h := &mb.fkCheckHelper
+		if !h.initWithInboundFK(mb, i) {
+			continue
+		}
+
+		if a := h.fk.UpdateReferenceAction(); a != tree.Restrict && a != tree.NoAction {
+			// Bail, so that exec FK checks pick up on FK checks and perform them.
+			mb.checks = nil
+			mb.fkFallback = true
+			return
+		}
+
+		// Construct an Except expression for the set difference between "old" FK
+		// values and "new" FK values. Note that technically, to get the old rows we
+		// should be selecting only the rows that are being updated (using a
+		// "canaryCol IS NOT NULL" condition); but these rows are harmless because
+		// they have all-null fetched values and thus will never match in the semi
+		// join.
+		oldRows, colsForOldRow, _ := h.makeFKInputScan(fkInputScanFetchedVals)
+		newRows, colsForNewRow, _ := h.makeFKInputScan(fkInputScanNewVals)
+
+		// The rows that no longer exist are the ones that were "deleted" by virtue
+		// of being updated _from_, minus the ones that were "added" by virtue of
+		// being updated _to_.
+		deletedRows := mb.b.factory.ConstructExcept(
+			oldRows,
+			newRows,
+			&memo.SetPrivate{
+				LeftCols:  colsForOldRow,
+				RightCols: colsForNewRow,
+				OutCols:   colsForOldRow,
+			},
+		)
+		mb.addDeletionCheck(h, deletedRows, colsForOldRow)
 	}
 }
 
